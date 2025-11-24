@@ -43,9 +43,12 @@ export const generatePlaylistStructure = async (
 
     Regras de Estrutura:
     1. A soma das durações deve aproximar ${settings.targetBlockDuration * 60} segundos.
-    2. SEQUÊNCIA PADRÃO OBRIGATÓRIA: Deve-se intercalar MÚSICA -> VINHETA -> MÚSICA -> VINHETA. Sempre que possível, após cada música, insira uma vinheta curta.
-    3. COMERCIAIS: Devem ser agrupados em sequência EXATAMENTE no FINAL do bloco. Quantidade: ${settings.commercialsPerBlock}.
-    4. O bloco deve começar com MÚSICA.
+    2. SEQUÊNCIA BASE: A estrutura predominante deve ser MÚSICA -> VINHETA -> MÚSICA -> VINHETA.
+    3. CONTEÚDO 'OTHER' (QUADROS/NOTÍCIAS): Esses conteúdos são "Livres" e "Flutuantes". Eles PODEM e DEVEM ser posicionados em qualquer ponto entre as músicas para enriquecer a programação. Evite colocá-los colados com comerciais, mas entre músicas é excelente.
+    4. ABERTURA E ENCERRAMENTO ('OPENING_CLOSING'):
+       - Se houver uma faixa 'OPENING_CLOSING' cujo nome sugira "abertura", "inicio", "intro", ela DEVE ser obrigatoriamente a primeira faixa do bloco (index 0).
+       - Se houver uma faixa 'OPENING_CLOSING' cujo nome sugira "encerramento", "final", "fechamento", ela DEVE ser obrigatoriamente a última faixa do bloco (após os comerciais).
+    5. COMERCIAIS: Devem ser agrupados em sequência perto do final do bloco (mas antes do Encerramento, se houver). Quantidade: ${settings.commercialsPerBlock}.
     
     Gere a playlist em formato JSON.
   `;
@@ -58,7 +61,7 @@ export const generatePlaylistStructure = async (
       properties: {
         trackId: { type: Type.STRING, description: "ID exato do inventário" },
         trackName: { type: Type.STRING, description: "Nome da faixa" },
-        type: { type: Type.STRING, enum: [TrackType.MUSIC, TrackType.JINGLE, TrackType.COMMERCIAL, TrackType.VOICE, TrackType.OTHER] },
+        type: { type: Type.STRING, enum: [TrackType.MUSIC, TrackType.JINGLE, TrackType.COMMERCIAL, TrackType.VOICE, TrackType.OTHER, TrackType.OPENING_CLOSING] },
         crossfadeDuration: { type: Type.NUMBER, description: "Duração recomendada da transição (use 0 se não houver mixagem)" }
       },
       required: ["trackId", "trackName", "type", "crossfadeDuration"]

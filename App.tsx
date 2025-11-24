@@ -5,6 +5,7 @@ import { PlaylistView } from './components/PlaylistView';
 import { ConfigPanel } from './components/ConfigPanel';
 import { AdminPanel } from './components/AdminPanel';
 import { LoginModal } from './components/LoginModal';
+import { TrackLibrary } from './components/TrackLibrary';
 import { generatePlaylistStructure } from './services/geminiService';
 import { audioProcessor } from './services/audioProcessor';
 
@@ -17,10 +18,15 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const [tracks, setTracks] = useState<Track[]>([]);
   const [playlist, setPlaylist] = useState<PlaylistEntry[]>([]);
   
+  // Undo/Redo State
+  const [historyStack, setHistoryStack] = useState<PlaylistEntry[][]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
   // App Settings
   const [settings, setSettings] = useState<AppSettings>({
     targetBlockDuration: 15,
@@ -98,6 +104,37 @@ export default function App() {
   // --- Handlers ---
   const toggleTheme = () => setIsDarkMode(!isDarkMode);
 
+  // Undo/Redo Logic
+  const updatePlaylistWithHistory = (newPlaylist: PlaylistEntry[]) => {
+    const newHistory = historyStack.slice(0, historyIndex + 1);
+    newHistory.push(newPlaylist);
+    setHistoryStack(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+    setPlaylist(newPlaylist);
+  };
+
+  // Initialize history when generating new playlist
+  const setInitialPlaylist = (newPlaylist: PlaylistEntry[]) => {
+      setHistoryStack([newPlaylist]);
+      setHistoryIndex(0);
+      setPlaylist(newPlaylist);
+  };
+
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      setHistoryIndex(historyIndex - 1);
+      setPlaylist(historyStack[historyIndex - 1]);
+    }
+  };
+
+  const handleRedo = () => {
+    if (historyIndex < historyStack.length - 1) {
+      setHistoryIndex(historyIndex + 1);
+      setPlaylist(historyStack[historyIndex + 1]);
+    }
+  };
+
+
   // User Management
   const handleLoginValidation = (u: string, p: string): boolean => {
     const user = users.find(user => user.username === u && user.password === p);
@@ -134,6 +171,10 @@ export default function App() {
     }
     setTracks(prev => [...prev, ...newTracks]);
   }, []);
+
+  const handleRemoveTrack = (id: string) => {
+      setTracks(prev => prev.filter(t => t.id !== id));
+  };
 
   const handleRecordToggle = async () => {
     if (isRecording) {
@@ -182,6 +223,8 @@ export default function App() {
     
     setIsGenerating(true);
     setPlaylist([]);
+    setHistoryStack([]);
+    setHistoryIndex(-1);
     setDownloadWavUrl(null);
     setMasterBuffer(null);
     setStatusMessage("IA analisando biblioteca e regras de rotação (60min)...");
@@ -193,7 +236,7 @@ export default function App() {
         .map(e => e.trackName);
 
       const result = await generatePlaylistStructure(tracks, settings, recentTracks);
-      setPlaylist(result);
+      setInitialPlaylist(result);
       setStatusMessage("Agendamento gerado. Personalize ou Mixe.");
     } catch (e) {
       setStatusMessage("Erro ao gerar playlist. Verifique a API Key.");
@@ -292,12 +335,14 @@ export default function App() {
   const getCount = (type: TrackType) => tracks.filter(t => t.type === type).length;
   const getVoiceTracks = () => tracks.filter(t => t.type === TrackType.VOICE);
 
-  const handlePlaylistReorder = (newPl: PlaylistEntry[]) => setPlaylist(newPl);
+  const handlePlaylistReorder = (newPl: PlaylistEntry[]) => updatePlaylistWithHistory(newPl);
+  
   const handlePlaylistRemove = (idx: number) => {
       const newPl = [...playlist];
       newPl.splice(idx, 1);
-      setPlaylist(newPl);
+      updatePlaylistWithHistory(newPl);
   };
+  
   const handlePlaylistInsert = (index: number, track: Track) => {
       const newEntry: PlaylistEntry = {
           trackId: track.id,
@@ -307,7 +352,7 @@ export default function App() {
       };
       const newPl = [...playlist];
       newPl.splice(index, 0, newEntry);
-      setPlaylist(newPl);
+      updatePlaylistWithHistory(newPl);
   };
 
   // --- Views ---
@@ -441,7 +486,25 @@ export default function App() {
               </svg>
             }
           />
+          <UploadZone 
+            type={TrackType.OPENING_CLOSING} 
+            count={getCount(TrackType.OPENING_CLOSING)}
+            onUpload={handleUpload}
+            icon={
+              <svg className="w-10 h-10 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z" />
+              </svg>
+            }
+          />
         </div>
+
+        {/* Track Library (Filtered List) */}
+        <TrackLibrary 
+            tracks={tracks}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            onRemoveTrack={handleRemoveTrack}
+        />
         
         {/* Recorder / Voice Zone */}
         <div className="mb-10 relative group border-2 border-dashed border-red-200 dark:border-red-500/50 bg-red-50 dark:bg-red-900/5 hover:bg-red-100 dark:hover:bg-red-900/10 rounded-xl p-6 transition-all duration-300 flex flex-col items-center justify-center h-48 max-w-2xl mx-auto">
@@ -560,6 +623,10 @@ export default function App() {
             onInsert={handlePlaylistInsert}
             onPreview={(b) => { /* Preview handled by main audio player now */ }}
             onSave={handleSavePlaylist}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            canUndo={historyIndex > 0}
+            canRedo={historyIndex < historyStack.length - 1}
         />
 
       </main>

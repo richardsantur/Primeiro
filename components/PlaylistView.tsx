@@ -10,6 +10,10 @@ interface PlaylistViewProps {
   onRemove: (index: number) => void;
   onPreview: (blob: Blob | null) => void;
   onSave: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ 
@@ -20,7 +24,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   onInsert,
   onRemove,
   onPreview,
-  onSave
+  onSave,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo
 }) => {
   const [insertIndex, setInsertIndex] = useState<number | null>(null);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
@@ -33,6 +41,20 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeUrlRef = useRef<string | null>(null);
+
+  // Calculate Total Playlist Duration
+  const totalDurationSeconds = playlist.reduce((acc, entry) => {
+    const track = tracks.find(t => t.id === entry.trackId);
+    return acc + (track ? track.duration : 0);
+  }, 0);
+
+  const formatTotalDuration = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    return `${m}m ${s}s`;
+  };
 
   // Cleanup audio on unmount
   useEffect(() => {
@@ -132,6 +154,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
       case TrackType.COMMERCIAL: return "bg-amber-600 border-amber-400";
       case TrackType.VOICE: return "bg-red-600 border-red-400";
       case TrackType.OTHER: return "bg-teal-600 border-teal-400";
+      case TrackType.OPENING_CLOSING: return "bg-indigo-600 border-indigo-400";
       default: return "bg-gray-600";
     }
   };
@@ -149,10 +172,13 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const handleDragStart = (e: React.DragEvent, index: number) => {
     setDraggedIdx(index);
     e.dataTransfer.effectAllowed = "move";
+    // Set explicit data to enable dropping in some browsers/scenarios
+    e.dataTransfer.setData("text/plain", index.toString());
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
+    // Allow drop
     e.dataTransfer.dropEffect = "move";
   };
 
@@ -175,11 +201,39 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   return (
     <div className="w-full max-w-4xl mx-auto mt-8 pb-10">
       <div className="flex flex-col md:flex-row justify-between items-end md:items-center mb-6 gap-4">
-         <h2 className="text-xl font-bold text-gray-800 dark:text-gray-300 flex items-center">
-            <span className="w-2 h-8 bg-green-500 mr-3 rounded-full"></span>
-            Agendamento Gerado
-        </h2>
+         <div className="flex items-center">
+            <span className="w-2 h-10 bg-green-500 mr-3 rounded-full"></span>
+            <div>
+              <h2 className="text-xl font-bold text-gray-800 dark:text-gray-300">
+                Agendamento Gerado
+              </h2>
+              <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                Duração Total: <span className="text-gray-700 dark:text-gray-200">{formatTotalDuration(totalDurationSeconds)}</span>
+              </p>
+            </div>
+        </div>
         <div className="flex items-center gap-3">
+             {/* Undo/Redo Buttons */}
+             <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700 mr-2">
+                <button 
+                  onClick={onUndo} 
+                  disabled={!canUndo}
+                  className="p-1.5 text-gray-600 dark:text-gray-300 hover:text-blue-500 disabled:opacity-30 disabled:hover:text-gray-600 transition-colors"
+                  title="Desfazer"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
+                </button>
+                <div className="w-[1px] h-4 bg-gray-300 dark:bg-gray-700"></div>
+                <button 
+                  onClick={onRedo} 
+                  disabled={!canRedo}
+                  className="p-1.5 text-gray-600 dark:text-gray-300 hover:text-blue-500 disabled:opacity-30 disabled:hover:text-gray-600 transition-colors"
+                  title="Refazer"
+                >
+                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6" /></svg>
+                </button>
+             </div>
+
              <button 
                 onClick={onSave}
                 className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold border border-gray-300 dark:border-gray-700 transition-colors"
@@ -187,7 +241,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>
                 Salvar JSON
              </button>
-             <div className="text-xs text-gray-500 bg-gray-200 dark:bg-gray-900 px-3 py-1.5 rounded-full border border-gray-300 dark:border-gray-800">
+             <div className="text-xs text-gray-500 bg-gray-200 dark:bg-gray-900 px-3 py-1.5 rounded-full border border-gray-300 dark:border-gray-800 hidden sm:block">
                  Arraste para reordenar
             </div>
         </div>
@@ -283,7 +337,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                         )}
 
                         <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-900 text-gray-500 dark:text-gray-400 mr-2 shrink-0`}>
-                        {item.type}
+                        {item.type.replace('_', ' ')}
                         </span>
                         <span className={`text-gray-800 dark:text-gray-200 font-medium truncate select-none ${previewId === item.trackId ? 'text-blue-600 dark:text-blue-400' : ''}`}>
                           {item.trackName}

@@ -3,7 +3,8 @@ export enum TrackType {
   JINGLE = 'JINGLE',
   COMMERCIAL = 'COMMERCIAL',
   VOICE = 'VOICE', // Off/Locution
-  OTHER = 'OTHER' // News, Programs, etc.
+  OTHER = 'OTHER', // News, Programs, etc.
+  OPENING_CLOSING = 'OPENING_CLOSING' // Intros and Outros
 }
 
 export interface Track {
