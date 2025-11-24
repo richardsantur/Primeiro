@@ -24,12 +24,51 @@ export const generatePlaylistStructure = async (
     duration: Math.floor(t.duration)
   }));
 
+  const hasCommercials = inventory.some(t => t.type === TrackType.COMMERCIAL);
+  const isLongBlock = settings.targetBlockDuration >= 55; // Consider blocks close to 60m as long blocks
+
+  // --- Dynamic Rules Construction ---
+
+  // 1. Commercial Logic
+  let commercialRule = "";
+  if (!hasCommercials) {
+    commercialRule = `
+    REGRA DE OURO (COMERCIAIS): O inventário NÃO possui arquivos do tipo 'COMMERCIAL'. 
+    Portanto, NÃO insira nenhum item 'COMMERCIAL' na playlist. IGNORE a configuração de "Comerciais por Bloco".
+    `;
+  } else if (isLongBlock) {
+    commercialRule = `
+    REGRA DE OURO (COMERCIAIS - BLOCO LONGO):
+    Como este é um bloco de longa duração (${settings.targetBlockDuration} min), NÃO coloque os comerciais no final.
+    Insira o bloco de comerciais (quantidade: ${settings.commercialsPerBlock}) EXATAMENTE quando a playlist atingir aproximadamente 30 minutos de duração (Meio do bloco).
+    `;
+  } else {
+    commercialRule = `
+    REGRA DE OURO (COMERCIAIS): 
+    Devem ser agrupados em sequência perto do FINAL do bloco (mas antes do Encerramento, se houver). 
+    Quantidade: ${settings.commercialsPerBlock}.
+    `;
+  }
+
+  // 2. 'Other' Logic (News/Frames)
+  let otherRule = "";
+  if (isLongBlock) {
+    otherRule = `
+    CONTEÚDO 'OTHER' (QUADROS/NOTÍCIAS) - BLOCO LONGO:
+    Devem ser inseridos JUNTAMENTE com os comerciais, por volta da marca de 30 minutos (Meio da programação).
+    `;
+  } else {
+    otherRule = `
+    CONTEÚDO 'OTHER' (QUADROS/NOTÍCIAS): 
+    Esses conteúdos são "Livres" e "Flutuantes". Eles PODEM e DEVEM ser posicionados em qualquer ponto entre as músicas para enriquecer a programação.
+    `;
+  }
+
   const prompt = `
     Você é um Programador de Rádio Automático (MixToPlay) experiente.
     
     Configurações do Usuário:
     - Duração Alvo do Bloco: ${settings.targetBlockDuration} minutos.
-    - Comerciais por Bloco: ${settings.commercialsPerBlock} (Devem ir no final).
     
     Inventário disponível: ${JSON.stringify(inventory)}
     
@@ -44,11 +83,14 @@ export const generatePlaylistStructure = async (
     Regras de Estrutura:
     1. A soma das durações deve aproximar ${settings.targetBlockDuration * 60} segundos.
     2. SEQUÊNCIA BASE: A estrutura predominante deve ser MÚSICA -> VINHETA -> MÚSICA -> VINHETA.
-    3. CONTEÚDO 'OTHER' (QUADROS/NOTÍCIAS): Esses conteúdos são "Livres" e "Flutuantes". Eles PODEM e DEVEM ser posicionados em qualquer ponto entre as músicas para enriquecer a programação. Evite colocá-los colados com comerciais, mas entre músicas é excelente.
-    4. ABERTURA E ENCERRAMENTO ('OPENING_CLOSING'):
+    
+    3. ABERTURA E ENCERRAMENTO ('OPENING_CLOSING'):
        - Se houver uma faixa 'OPENING_CLOSING' cujo nome sugira "abertura", "inicio", "intro", ela DEVE ser obrigatoriamente a primeira faixa do bloco (index 0).
-       - Se houver uma faixa 'OPENING_CLOSING' cujo nome sugira "encerramento", "final", "fechamento", ela DEVE ser obrigatoriamente a última faixa do bloco (após os comerciais).
-    5. COMERCIAIS: Devem ser agrupados em sequência perto do final do bloco (mas antes do Encerramento, se houver). Quantidade: ${settings.commercialsPerBlock}.
+       - Se houver uma faixa 'OPENING_CLOSING' cujo nome sugira "encerramento", "final", "fechamento", ela DEVE ser obrigatoriamente a última faixa do bloco.
+
+    ${commercialRule}
+
+    ${otherRule}
     
     Gere a playlist em formato JSON.
   `;

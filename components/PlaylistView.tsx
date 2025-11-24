@@ -1,13 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { PlaylistEntry, Track, TrackType } from '../types';
+import { audioProcessor } from '../services/audioProcessor';
 
 interface PlaylistViewProps {
   playlist: PlaylistEntry[];
-  tracks: Track[]; // Needed to access the file blob for preview
-  availableVoiceTracks: Track[];
+  tracks: Track[]; // Needed to access the file blob for preview and for insertion list
   onReorder: (newPlaylist: PlaylistEntry[]) => void;
   onInsert: (index: number, track: Track) => void;
   onRemove: (index: number) => void;
+  onUpdateEntry: (index: number, updates: Partial<PlaylistEntry>) => void;
+  onCommitChanges: () => void;
   onPreview: (blob: Blob | null) => void;
   onSave: () => void;
   onUndo: () => void;
@@ -19,10 +21,11 @@ interface PlaylistViewProps {
 export const PlaylistView: React.FC<PlaylistViewProps> = ({ 
   playlist, 
   tracks,
-  availableVoiceTracks,
   onReorder,
   onInsert,
   onRemove,
+  onUpdateEntry,
+  onCommitChanges,
   onPreview,
   onSave,
   onUndo,
@@ -32,15 +35,21 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
 }) => {
   const [insertIndex, setInsertIndex] = useState<number | null>(null);
   const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
+  const [insertFilter, setInsertFilter] = useState<string>('ALL'); // Filter state for insert popup
   
   // Preview State
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const [isPreviewingTransition, setIsPreviewingTransition] = useState<string | null>(null); // trackId being transitioned from
   const [volume, setVolume] = useState<number>(1.0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeUrlRef = useRef<string | null>(null);
+
+  // Transition Preview Refs
+  const transitionContextRef = useRef<AudioContext | null>(null);
+  const transitionSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
   // Calculate Total Playlist Duration
   const totalDurationSeconds = playlist.reduce((acc, entry) => {
@@ -59,13 +68,8 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   // Cleanup audio on unmount
   useEffect(() => {
     return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      if (activeUrlRef.current) {
-        URL.revokeObjectURL(activeUrlRef.current);
-      }
+      stopAudio();
+      stopTransitionPreview();
     };
   }, []);
 
@@ -76,7 +80,118 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     }
   }, [volume]);
 
+  const stopAudio = () => {
+    if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+    }
+    if (activeUrlRef.current) {
+        URL.revokeObjectURL(activeUrlRef.current);
+        activeUrlRef.current = null;
+    }
+    setPreviewId(null);
+  };
+
+  const stopTransitionPreview = () => {
+    transitionSourcesRef.current.forEach(src => {
+        try { src.stop(); } catch(e) {}
+    });
+    transitionSourcesRef.current = [];
+    if (transitionContextRef.current) {
+        transitionContextRef.current.close();
+        transitionContextRef.current = null;
+    }
+    setIsPreviewingTransition(null);
+  };
+
+  const playTransitionPreview = async (index: number) => {
+      stopAudio(); // Stop normal preview
+      stopTransitionPreview(); // Stop existing transition preview
+
+      const currentEntry = playlist[index];
+      const nextEntry = playlist[index + 1];
+
+      if (!nextEntry) return;
+
+      const trackA = tracks.find(t => t.id === currentEntry.trackId);
+      const trackB = tracks.find(t => t.id === nextEntry.trackId);
+
+      if (!trackA || !trackB) return;
+
+      setIsPreviewingTransition(currentEntry.trackId);
+
+      try {
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        transitionContextRef.current = ctx;
+
+        // Decode buffers
+        // Note: In a real heavy app, we'd cache these buffers. Here we decode on demand for preview.
+        const bufferA = await audioProcessor.decodeTrack(trackA);
+        const bufferB = await audioProcessor.decodeTrack(trackB);
+
+        const crossfadeDur = currentEntry.crossfadeDuration || 0;
+        const previewDurationA = 5; // Play last 5s of A
+        const previewDurationB = 5; // Play first 5s of B
+
+        // Logic:
+        // A ends at T=previewDurationA
+        // B starts at T=previewDurationA - crossfadeDur
+        
+        // Source A
+        const sourceA = ctx.createBufferSource();
+        sourceA.buffer = bufferA;
+        const gainA = ctx.createGain();
+        sourceA.connect(gainA);
+        gainA.connect(ctx.destination);
+        
+        // Play last segment of A
+        // Start time in context: 0
+        // Offset in buffer: length - previewDurationA
+        // Duration: previewDurationA + overlap (if we want to hear fade out completely) -> actually just play till end
+        const offsetA = Math.max(0, bufferA.duration - previewDurationA);
+        sourceA.start(0, offsetA);
+
+        // Gain Envelope A: Fade Out
+        // Starts fading out at (previewDurationA - crossfadeDur) relative to preview start?
+        // No, in the mix timeline, A fades out at its very end.
+        // So relative to the preview start (which is T-5s from end), the fade starts at 5s - crossfadeDur.
+        const fadeOutStart = Math.max(0, previewDurationA - crossfadeDur);
+        gainA.gain.setValueAtTime(1, 0); // Start full
+        gainA.gain.setValueAtTime(1, ctx.currentTime + fadeOutStart);
+        gainA.gain.linearRampToValueAtTime(0, ctx.currentTime + previewDurationA);
+
+        // Source B
+        const sourceB = ctx.createBufferSource();
+        sourceB.buffer = bufferB;
+        const gainB = ctx.createGain();
+        sourceB.connect(gainB);
+        gainB.connect(ctx.destination);
+
+        // Start B relative to A's end
+        const startTimeB = Math.max(0, previewDurationA - crossfadeDur);
+        sourceB.start(startTimeB, 0); // Start from beginning of B
+
+        // Gain Envelope B: Fade In
+        gainB.gain.setValueAtTime(0, ctx.currentTime + startTimeB);
+        gainB.gain.linearRampToValueAtTime(1, ctx.currentTime + startTimeB + crossfadeDur);
+
+        transitionSourcesRef.current = [sourceA, sourceB];
+
+        // Auto stop after preview
+        sourceB.onended = () => {
+            setIsPreviewingTransition(null);
+            ctx.close();
+        };
+
+      } catch (e) {
+          console.error("Preview failed", e);
+          setIsPreviewingTransition(null);
+      }
+  };
+
   const togglePreview = (trackId: string) => {
+    stopTransitionPreview();
+
     // 1. Find the track file
     const track = tracks.find(t => t.id === trackId);
     if (!track) return;
@@ -93,7 +208,6 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     // 3. Stop previous if any
     if (audioRef.current) {
       audioRef.current.pause();
-      // Do not reset src immediately to avoid interrupting fetch in a way that throws uncaught errors sometimes
     }
 
     // 4. Revoke previous URL to free memory
@@ -145,6 +259,80 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
     setPreviewId(trackId);
   };
 
+  const getFilteredTracksForInsert = () => {
+      if (insertFilter === 'ALL') return tracks;
+      return tracks.filter(t => t.type === insertFilter);
+  };
+
+  const getTypeLabel = (type: string) => {
+    switch (type) {
+        case 'ALL': return 'Todos';
+        case TrackType.VOICE: return 'Voz/Off';
+        case TrackType.JINGLE: return 'Vinhetas';
+        case TrackType.MUSIC: return 'Músicas';
+        case TrackType.COMMERCIAL: return 'Comerciais';
+        case TrackType.OTHER: return 'Outros';
+        case TrackType.OPENING_CLOSING: return 'Abertura/Fim';
+        default: return type;
+    }
+  };
+
+  // Helper to render the Insert Popup
+  const renderInsertPopup = (idx: number) => (
+    <div className="absolute left-1/2 transform -translate-x-1/2 z-30 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-3 rounded-xl shadow-2xl w-80 max-h-80 flex flex-col animate-fade-in-up">
+        <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-100 dark:border-gray-800">
+            <h4 className="text-xs font-bold text-gray-500 uppercase">Inserir na Playlist</h4>
+            <button onClick={() => setInsertIndex(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+        </div>
+        
+        {/* Filter Tabs */}
+        <div className="flex gap-1 overflow-x-auto pb-2 mb-1 custom-scrollbar">
+            {['ALL', TrackType.VOICE, TrackType.JINGLE, TrackType.MUSIC, TrackType.COMMERCIAL, TrackType.OTHER].map(type => (
+                <button
+                    key={type}
+                    onClick={() => setInsertFilter(type)}
+                    className={`text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap transition-colors ${
+                        insertFilter === type 
+                        ? 'bg-blue-600 text-white' 
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700'
+                    }`}
+                >
+                    {getTypeLabel(type)}
+                </button>
+            ))}
+        </div>
+
+        {/* List */}
+        <div className="overflow-y-auto flex-1 custom-scrollbar space-y-1">
+            {getFilteredTracksForInsert().length === 0 ? (
+                <p className="text-xs text-center py-4 text-gray-400">Nenhum áudio nesta categoria.</p>
+            ) : (
+                getFilteredTracksForInsert().map(t => (
+                    <div key={t.id} 
+                        onClick={() => {
+                            onInsert(idx, t);
+                            setInsertIndex(null);
+                        }}
+                        className="flex items-center justify-between group p-2 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer rounded-lg border border-transparent hover:border-gray-100 dark:hover:border-gray-700 transition-all">
+                        <div className="flex items-center gap-2 overflow-hidden">
+                             <span className={`w-2 h-2 rounded-full shrink-0 ${
+                                 t.type === TrackType.MUSIC ? 'bg-blue-500' :
+                                 t.type === TrackType.JINGLE ? 'bg-purple-500' :
+                                 t.type === TrackType.VOICE ? 'bg-red-500' : 
+                                 'bg-gray-400'
+                             }`}></span>
+                             <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{t.name}</span>
+                        </div>
+                        <span className="text-[10px] text-gray-400 shrink-0">{Math.round(t.duration)}s</span>
+                    </div>
+                ))
+            )}
+        </div>
+    </div>
+  );
+
   if (playlist.length === 0) return null;
 
   const getTypeColor = (type: TrackType) => {
@@ -172,13 +360,11 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
   const handleDragStart = (e: React.DragEvent, index: number) => {
     setDraggedIdx(index);
     e.dataTransfer.effectAllowed = "move";
-    // Set explicit data to enable dropping in some browsers/scenarios
     e.dataTransfer.setData("text/plain", index.toString());
   };
 
   const handleDragOver = (e: React.DragEvent, index: number) => {
     e.preventDefault();
-    // Allow drop
     e.dataTransfer.dropEffect = "move";
   };
 
@@ -251,33 +437,17 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
         {playlist.map((item, idx) => (
           <React.Fragment key={`${item.trackId}-${idx}`}>
              {/* Insert Zone */}
-             <div className="h-4 group/insert relative flex justify-center items-center hover:h-10 transition-all">
+             <div className="h-4 group/insert relative flex justify-center items-center hover:h-10 transition-all z-20">
                 <div className="w-full h-[1px] bg-gray-300 dark:bg-gray-800 group-hover/insert:bg-gray-400 dark:group-hover/insert:bg-gray-600"></div>
                 <button 
-                    onClick={() => setInsertIndex(insertIndex === idx ? null : idx)}
+                    onClick={() => {
+                        setInsertIndex(insertIndex === idx ? null : idx);
+                        setInsertFilter('ALL'); // Reset filter
+                    }}
                     className="absolute bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400 text-xs px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 opacity-0 group-hover/insert:opacity-100 hover:bg-gray-300 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white transition-opacity z-20">
-                    + Inserir Voz/Off
+                    + Inserir
                 </button>
-                {insertIndex === idx && (
-                    <div className="absolute top-8 z-30 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-2 rounded-lg shadow-xl w-64 max-h-48 overflow-y-auto">
-                        <h4 className="text-xs font-bold text-gray-500 mb-2 uppercase">Selecionar Voz</h4>
-                        {availableVoiceTracks.length === 0 ? (
-                            <p className="text-xs text-red-400">Nenhuma gravação disponível.</p>
-                        ) : (
-                            availableVoiceTracks.map(vt => (
-                                <div key={vt.id} 
-                                    onClick={() => {
-                                        onInsert(idx, vt);
-                                        setInsertIndex(null);
-                                    }}
-                                    className="text-sm p-2 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer rounded text-gray-800 dark:text-white truncate">
-                                    {vt.name}
-                                </div>
-                            ))
-                        )}
-                        <button onClick={() => setInsertIndex(null)} className="w-full mt-2 text-xs text-center text-gray-500 hover:text-gray-800 dark:hover:text-white">Cancelar</button>
-                    </div>
-                )}
+                {insertIndex === idx && renderInsertPopup(idx)}
              </div>
 
             {/* Track Item (Draggable) */}
@@ -287,7 +457,7 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                 onDragOver={(e) => handleDragOver(e, idx)}
                 onDrop={(e) => handleDrop(e, idx)}
                 onDragEnd={handleDragEnd}
-                className={`relative flex items-center group transition-all duration-200 
+                className={`relative flex items-center group transition-all duration-200 z-10 
                   ${draggedIdx === idx ? 'opacity-40 scale-[0.98]' : 'opacity-100'} 
                   ${draggedIdx !== null && draggedIdx !== idx ? 'hover:translate-y-1' : ''}
                 `}
@@ -353,10 +523,41 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
                                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
                              </button>
                         </div>
-                        <div className="text-xs text-gray-400 dark:text-gray-500 flex flex-col items-end min-w-[60px]">
-                            <span>Mix -15dB</span>
+                        
+                        {/* Crossfade Editor & Preview */}
+                        <div className="flex flex-col items-end gap-1">
+                            <div className="flex items-center bg-gray-100 dark:bg-gray-900 rounded p-1">
+                                <span className="text-[9px] text-gray-500 dark:text-gray-400 mr-1 uppercase font-bold">Mix</span>
+                                <input 
+                                    type="number" 
+                                    className="w-10 text-xs bg-transparent text-right outline-none text-gray-800 dark:text-white font-mono"
+                                    value={item.crossfadeDuration}
+                                    onChange={(e) => onUpdateEntry(idx, { crossfadeDuration: parseFloat(e.target.value) || 0 })}
+                                    onBlur={onCommitChanges}
+                                    step="0.5"
+                                    min="0"
+                                />
+                                <span className="text-[9px] text-gray-500 dark:text-gray-400 ml-0.5">s</span>
+                            </div>
+                            
+                            {/* Transition Preview Button (only if not last item) */}
+                            {idx < playlist.length - 1 && (
+                                <button 
+                                    onClick={() => playTransitionPreview(idx)}
+                                    className={`text-[9px] px-1.5 py-0.5 rounded border transition-colors flex items-center gap-1 ${isPreviewingTransition === item.trackId ? 'bg-green-100 dark:bg-green-900 border-green-500 text-green-700 dark:text-green-300' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500'}`}
+                                    title="Ouvir transição"
+                                >
+                                    {isPreviewingTransition === item.trackId ? (
+                                        <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                    ) : (
+                                        <svg className="w-2 h-2" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    )}
+                                    Preview
+                                </button>
+                            )}
                         </div>
-                        <button onClick={() => onRemove(idx)} className="text-gray-400 hover:text-red-500 dark:text-gray-600 transition-colors">
+
+                        <button onClick={() => onRemove(idx)} className="text-gray-400 hover:text-red-500 dark:text-gray-600 transition-colors ml-2">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                         </button>
                     </div>
@@ -375,31 +576,19 @@ export const PlaylistView: React.FC<PlaylistViewProps> = ({
           </React.Fragment>
         ))}
          {/* Final Insert Zone */}
-         <div className="h-4 group/insert relative flex justify-center items-center hover:h-10 transition-all">
+         <div className="h-4 group/insert relative flex justify-center items-center hover:h-10 transition-all z-20">
                 <div className="w-full h-[1px] bg-gray-300 dark:bg-gray-800 group-hover/insert:bg-gray-400 dark:group-hover/insert:bg-gray-600"></div>
                 <button 
-                    onClick={() => setInsertIndex(playlist.length)}
+                    onClick={() => {
+                        setInsertIndex(playlist.length);
+                        setInsertFilter('ALL');
+                    }}
                     className="absolute bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400 text-xs px-2 py-0.5 rounded-full border border-gray-300 dark:border-gray-700 opacity-0 group-hover/insert:opacity-100 hover:bg-gray-300 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white transition-opacity z-20">
-                    + Inserir Voz/Off
+                    + Inserir
                 </button>
                  {insertIndex === playlist.length && (
-                    <div className="absolute bottom-8 z-30 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-2 rounded-lg shadow-xl w-64 max-h-48 overflow-y-auto">
-                        <h4 className="text-xs font-bold text-gray-500 mb-2 uppercase">Selecionar Voz</h4>
-                         {availableVoiceTracks.length === 0 ? (
-                            <p className="text-xs text-red-400">Nenhuma gravação.</p>
-                        ) : (
-                            availableVoiceTracks.map(vt => (
-                                <div key={vt.id} 
-                                    onClick={() => {
-                                        onInsert(playlist.length, vt);
-                                        setInsertIndex(null);
-                                    }}
-                                    className="text-sm p-2 hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer rounded text-gray-800 dark:text-white truncate">
-                                    {vt.name}
-                                </div>
-                            ))
-                        )}
-                        <button onClick={() => setInsertIndex(null)} className="w-full mt-2 text-xs text-center text-gray-500 hover:text-gray-800 dark:hover:text-white">Cancelar</button>
+                    <div className="absolute bottom-8 transform z-30">
+                        {renderInsertPopup(playlist.length)}
                     </div>
                 )}
          </div>

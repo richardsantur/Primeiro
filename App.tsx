@@ -333,7 +333,7 @@ export default function App() {
   }, [playlist]);
 
   const getCount = (type: TrackType) => tracks.filter(t => t.type === type).length;
-  const getVoiceTracks = () => tracks.filter(t => t.type === TrackType.VOICE);
+  // const getVoiceTracks = () => tracks.filter(t => t.type === TrackType.VOICE); // No longer needed
 
   const handlePlaylistReorder = (newPl: PlaylistEntry[]) => updatePlaylistWithHistory(newPl);
   
@@ -348,12 +348,28 @@ export default function App() {
           trackId: track.id,
           trackName: track.name,
           type: track.type,
-          crossfadeDuration: 1 
+          crossfadeDuration: settings.defaultCrossfade 
       };
       const newPl = [...playlist];
       newPl.splice(index, 0, newEntry);
       updatePlaylistWithHistory(newPl);
   };
+
+  const handlePlaylistUpdate = (index: number, updates: Partial<PlaylistEntry>) => {
+      const newPl = [...playlist];
+      newPl[index] = { ...newPl[index], ...updates };
+      // Do not push to history for every slider drag, maybe? 
+      // For now, let's just update state to keep UI responsive, we could debounce history if needed.
+      // But user requested full undo/redo, so we treat it as an update.
+      // To avoid spamming history on drag, we can pass this to a different update method if wanted.
+      // For simplicity/safety:
+      setPlaylist(newPl);
+  };
+  
+  // Wrapper to commit changes to history (e.g. onBlur or onClick)
+  const commitPlaylistChange = () => {
+     updatePlaylistWithHistory(playlist);
+  }
 
   // --- Views ---
 
@@ -587,7 +603,7 @@ export default function App() {
                         className="px-6 py-3 bg-gray-600 hover:bg-gray-500 text-white rounded-xl font-bold text-sm shadow-xl flex items-center"
                     >
                         <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4 4m4 4V4" />
                         </svg>
                         Master WAV
                     </a>
@@ -617,10 +633,11 @@ export default function App() {
         <PlaylistView 
             playlist={playlist} 
             tracks={tracks}
-            availableVoiceTracks={getVoiceTracks()}
             onReorder={handlePlaylistReorder}
             onRemove={handlePlaylistRemove}
             onInsert={handlePlaylistInsert}
+            onUpdateEntry={handlePlaylistUpdate}
+            onCommitChanges={commitPlaylistChange}
             onPreview={(b) => { /* Preview handled by main audio player now */ }}
             onSave={handleSavePlaylist}
             onUndo={handleUndo}
